@@ -1198,7 +1198,8 @@ class RotarySelector(BaseSelector, object):
         self.cad_release_gates = list(mmu.config.getintlist('cad_release_gates', self.cad_release_gates))
 
         #新增
-        self.selector_release_offsets = mmu.config.getfloatlist('selector_release_offsets',count=mmu.num_gates)
+        #selector_release_offsets初始化为[-1,-1,-1,-1]
+        self.selector_release_offsets = [-1.0] * mmu.num_gates 
         
         # Register GCODE commands specific to this module
         gcode = mmu.printer.lookup_object('gcode')
