@@ -1162,7 +1162,11 @@ class RotarySelector(BaseSelector, object):
     # mmu_vars.cfg variables
     VARS_MMU_SELECTOR_OFFSETS  = "mmu_selector_offsets"
     VARS_MMU_SELECTOR_GATE_POS = "mmu_selector_gate_pos"
-
+    
+    #新增
+    #添加变量名mmu_selector_release_offsets
+    VARS_MMU_SELECTOR_RELEASE_OFFSETS = "mmu_selector_release_offsets"
+    
     def __init__(self, mmu):
         super(RotarySelector, self).__init__(mmu)
 
