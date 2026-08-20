@@ -1197,6 +1197,9 @@ class RotarySelector(BaseSelector, object):
         self.cad_gate_directions = list(mmu.config.getintlist('cad_gate_directions',self.cad_gate_directions))
         self.cad_release_gates = list(mmu.config.getintlist('cad_release_gates', self.cad_release_gates))
 
+        #新增
+        self.selector_release_offsets = mmu.config.getfloatlist('selector_release_offsets',count=mmu.num_gates)
+        
         # Register GCODE commands specific to this module
         gcode = mmu.printer.lookup_object('gcode')
         gcode.register_command('MMU_CALIBRATE_SELECTOR', self.cmd_MMU_CALIBRATE_SELECTOR, desc=self.cmd_MMU_CALIBRATE_SELECTOR_help)
@@ -1284,11 +1287,32 @@ class RotarySelector(BaseSelector, object):
     def filament_drive(self):
         self._grip(self.mmu.gate_selected)
 
-    def filament_release(self, measure=False):
-        if not self.mmu.mmu_machine.filament_always_gripped:
-            self._grip(self.mmu.gate_selected, release=True)
-        return 0. # Fake encoder movement
+    #def filament_release(self, measure=False):
+        #if not self.mmu.mmu_machine.filament_always_gripped:
+            #self._grip(self.mmu.gate_selected, release=True)
+        #return 0. # Fake encoder movement
 
+    #新增
+    def filament_release(self, measure=False):
+       #记录当前通道编号
+        gate = self.mmu.gate_selected
+
+        # 检查当前通道编号是否合理
+        if gate < 0 or gate >= self.mmu.num_gates:
+            self.mmu.log_always("Cannot release filament: invalid selected gate %d" % gate)
+            return 0.
+        
+        # 当filament_always_gripped=1 时，表示机构始终夹紧耗材，认为不执行释放动作
+        if self.mmu.mmu_machine.filament_always_gripped:
+            return 0.
+        
+        # 移动到当前 gate 对应的释放位置
+        release_pos = self.selector_release_offsets[gate]
+        self._position(release_pos)
+        
+        #更新选择器内部的夹持状态，告诉 Happy Hare：当前选择器已经释放耗材
+        self.grip_state = self.mmu.FILAMENT_RELEASE_STATE
+        return 0.
     # Note there is no separation of gate selection and grip/release with this type of selector
     def _grip(self, gate, release=False):
         if gate >= 0:
