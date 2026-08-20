@@ -233,9 +233,6 @@ class LinearSelector(BaseSelector, object):
         self.cad_bypass_block_delta = 9.
         self.cad_selector_tolerance = 15.
         
-        #新增
-        self.selector_release_offsets = mmu.config.getfloatlist('selector_release_offsets',count=mmu.num_gates)
-        
         # Specific vendor build parameters / tuning.
         if self.mmu.mmu_machine.mmu_vendor.lower() == mmu_machine.VENDOR_ERCF.lower():
             if self.mmu.mmu_machine.mmu_version >= 2.0: # V2 community edition
@@ -396,31 +393,9 @@ class LinearSelector(BaseSelector, object):
         if self.servo:
             self.servo.servo_down(buzz_gear=buzz_gear)
 
-    #def filament_release(self, measure=False):
-        #if self.servo:
-            #return self.servo.servo_up(measure=measure)
-
-    #新增
     def filament_release(self, measure=False):
-       #记录当前通道编号
-        gate = self.mmu.gate_selected
-
-        # 检查当前通道编号是否合理
-        if gate < 0 or gate >= self.mmu.num_gates:
-            self.mmu.log_always("Cannot release filament: invalid selected gate %d" % gate)
-            return 0.
-        
-        # 当filament_always_gripped=1 时，表示机构始终夹紧耗材，认为不执行释放动作
-        if self.mmu.mmu_machine.filament_always_gripped:
-            return 0.
-        
-        # 移动到当前 gate 对应的释放位置
-        release_pos = self.selector_release_offsets[gate]
-        self._position(release_pos)
-        
-        #更新选择器内部的夹持状态，告诉 Happy Hare：当前选择器已经释放耗材
-        self.grip_state = self.mmu.FILAMENT_RELEASE_STATE
-        return 0.
+        if self.servo:
+            return self.servo.servo_up(measure=measure)
         
     def filament_hold_move(self): # AKA position for holding filament and moving selector
         if self.servo:
@@ -1221,6 +1196,9 @@ class RotarySelector(BaseSelector, object):
 
         self.cad_gate_directions = list(mmu.config.getintlist('cad_gate_directions',self.cad_gate_directions))
         self.cad_release_gates = list(mmu.config.getintlist('cad_release_gates', self.cad_release_gates))
+
+        #新增
+        self.selector_release_offsets = mmu.config.getfloatlist('selector_release_offsets',count=mmu.num_gates)
         
         # Register GCODE commands specific to this module
         gcode = mmu.printer.lookup_object('gcode')
@@ -1246,7 +1224,20 @@ class RotarySelector(BaseSelector, object):
         self.mmu_toolhead = self.mmu.mmu_toolhead
         self.selector_rail = self.mmu_toolhead.get_kinematics().rails[0]
         self.selector_stepper = self.selector_rail.steppers[0]
+        
+        #新增，保存释放位置的变量
+        saved_release_offsets = self.mmu.save_variables.allVariables.get(self.VARS_MMU_SELECTOR_RELEASE_OFFSETS, None)
 
+        #新增
+        if saved_release_offsets is None:        #假如mmu_vars.cfg中没有mmu_selector_release_offsets = [...]
+            self.mmu.log_error("mmu_selector_release_offsets not found in mmu_vars.cfg")
+            self.selector_release_offsets = [-1] * self.mmu.num_gates    #创建一个长度等于通道数的列表，-1表示无效位置
+        else:
+            self.selector_release_offsets = [float(value) for value in saved_release_offsets]    #把列表中的每一个值转换为浮点数。
+
+        if len(self.selector_release_offsets) != self.mmu.num_gates:    #检查释放位置数量是否等于通道数量。
+            raise self.mmu.config.error("mmu_selector_release_offsets must contain exactly %d values"% self.mmu.num_gates) #创建并抛出 Klipper 配置错误
+        
         # Have an endstop (most likely stallguard)?
         endstops = self.selector_rail.get_endstops()
         self.has_endstop = bool(endstops) and endstops[0][0].__class__.__name__ != "MockEndstop"
@@ -1309,10 +1300,33 @@ class RotarySelector(BaseSelector, object):
     def filament_drive(self):
         self._grip(self.mmu.gate_selected)
 
+    #def filament_release(self, measure=False):
+        #if not self.mmu.mmu_machine.filament_always_gripped:
+            #self._grip(self.mmu.gate_selected, release=True)
+        #return 0. # Fake encoder movement
+
+    #新增
     def filament_release(self, measure=False):
-        if not self.mmu.mmu_machine.filament_always_gripped:
-            self._grip(self.mmu.gate_selected, release=True)
-        return 0. # Fake encoder movement
+       #记录当前通道编号
+        gate = self.mmu.gate_selected
+
+        # 检查当前通道编号是否合理
+        if gate < 0 or gate >= self.mmu.num_gates:
+            self.mmu.log_always("Cannot release filament: invalid selected gate %d" % gate)
+            return 0.
+        
+        # 当filament_always_gripped=1 时，表示机构始终夹紧耗材，认为不执行释放动作
+        if self.mmu.mmu_machine.filament_always_gripped:
+            return 0.
+        
+        # 移动到当前 gate 对应的释放位置
+        release_pos = self.selector_release_offsets[gate]
+        self._position(release_pos)
+        
+        #更新选择器内部的夹持状态，告诉 Happy Hare：当前选择器已经释放耗材
+        self.grip_state = self.mmu.FILAMENT_RELEASE_STATE
+        return 0. 
+        
     # Note there is no separation of gate selection and grip/release with this type of selector
     def _grip(self, gate, release=False):
         if gate >= 0:
