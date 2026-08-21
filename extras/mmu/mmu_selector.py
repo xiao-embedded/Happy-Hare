@@ -1154,7 +1154,7 @@ class LinearMultiGearSelector(LinearSelector, object):
 #   MMU_CALIBRATE_SELECTOR
 #   MMU_SOAKTEST_SELECTOR
 #   MMU_GRIP    - realign with selected gate
-#   MMU_RELEASE - move between gates to release filament
+#   MMU_RELEASE - move to the independent neutral position to release filament
 ################################################################################
 
 class RotarySelector(BaseSelector, object):
@@ -1163,9 +1163,9 @@ class RotarySelector(BaseSelector, object):
     VARS_MMU_SELECTOR_OFFSETS  = "mmu_selector_offsets"
     VARS_MMU_SELECTOR_GATE_POS = "mmu_selector_gate_pos"
     
-    #新增
-    #添加变量名mmu_selector_release_offsets
-    VARS_MMU_SELECTOR_RELEASE_OFFSETS = "mmu_selector_release_offsets"
+    # [明确修改] 释放位置改为一个独立的中立位置，
+    # 该变量保存在 mmu_vars.cfg 中，值是选择器的绝对位置。
+    VARS_MMU_SELECTOR_RELEASE_POSITION = "mmu_selector_release_position"
     
     def __init__(self, mmu):
         super(RotarySelector, self).__init__(mmu)
@@ -1190,6 +1190,10 @@ class RotarySelector(BaseSelector, object):
         self.cad_selector_tolerance = 15.
 
         self.cad_gate_directions = [1, 1, 0, 0]
+
+        # [明确修改] 原来的 cad_release_gates 会把“释放”实现为移动到另一个真实 gate
+        # 的位置。当前机构使用一个独立的中立释放位置，因此不再使用该列表。
+        # 保留下面的配置读取，兼容旧配置文件，但它不会再参与释放运动。
         self.cad_release_gates = [2, 3, 0, 1]
 
         # But still allow all CAD parameters to be customized
@@ -1199,12 +1203,9 @@ class RotarySelector(BaseSelector, object):
         self.cad_selector_tolerance = mmu.config.getfloat('cad_selector_tolerance', self.cad_selector_tolerance, above=0.) # Extra movement allowed by selector
 
         self.cad_gate_directions = list(mmu.config.getintlist('cad_gate_directions',self.cad_gate_directions))
+         # [明确修改] 仅为兼容旧配置读取 cad_release_gates；中立释放逻辑不会使用它。
         self.cad_release_gates = list(mmu.config.getintlist('cad_release_gates', self.cad_release_gates))
 
-        #新增
-        #selector_release_offsets初始化为[-1,-1,-1,-1]
-        self.selector_release_offsets = [-1.0] * mmu.num_gates 
-        
         # Register GCODE commands specific to this module
         gcode = mmu.printer.lookup_object('gcode')
         gcode.register_command('MMU_CALIBRATE_SELECTOR', self.cmd_MMU_CALIBRATE_SELECTOR, desc=self.cmd_MMU_CALIBRATE_SELECTOR_help)
@@ -1230,19 +1231,23 @@ class RotarySelector(BaseSelector, object):
         self.selector_rail = self.mmu_toolhead.get_kinematics().rails[0]
         self.selector_stepper = self.selector_rail.steppers[0]
         
-        #新增，保存释放位置的变量
-        saved_release_offsets = self.mmu.save_variables.allVariables.get(self.VARS_MMU_SELECTOR_RELEASE_OFFSETS, None)
-
-        #新增
-        if saved_release_offsets is None:        #假如mmu_vars.cfg中没有mmu_selector_release_offsets = [...]
-            self.mmu.log_error("mmu_selector_release_offsets not found in mmu_vars.cfg")
-            self.selector_release_offsets = [-1] * self.mmu.num_gates    #创建一个长度等于通道数的列表，-1表示无效位置
+        # [明确修改] 从持久化变量读取一个独立的中立释放位置。
+        # 不设置该变量时使用 -1 作为“尚未校准”标志，禁止误动作到未知位置。
+        saved_release_position = self.mmu.save_variables.allVariables.get(
+            self.VARS_MMU_SELECTOR_RELEASE_POSITION, None)
+        if saved_release_position is None:
+            self.selector_release_position = -1.0
+            self.mmu.log_error(
+                "%s not found in mmu_vars.cfg; run SAVE_VARIABLE before MMU_RELEASE"
+                % self.VARS_MMU_SELECTOR_RELEASE_POSITION)
         else:
-            self.selector_release_offsets = [float(value) for value in saved_release_offsets]    #把列表中的每一个值转换为浮点数。
-
-        if len(self.selector_release_offsets) != self.mmu.num_gates:    #检查释放位置数量是否等于通道数量。
-            raise self.mmu.config.error("mmu_selector_release_offsets must contain exactly %d values"% self.mmu.num_gates) #创建并抛出 Klipper 配置错误
-        
+                try:
+                    self.selector_release_position = float(saved_release_position)
+                except (TypeError, ValueError):
+                    self.selector_release_position = -1.0
+                    self.mmu.log_error(
+                    "%s must be a single numeric selector position"
+                    % self.VARS_MMU_SELECTOR_RELEASE_POSITION)
         # Have an endstop (most likely stallguard)?
         endstops = self.selector_rail.get_endstops()
         self.has_endstop = bool(endstops) and endstops[0][0].__class__.__name__ != "MockEndstop"
@@ -1294,10 +1299,23 @@ class RotarySelector(BaseSelector, object):
     def restore_gate(self, gate):
         gate_pos = self.mmu.save_variables.allVariables.get(self.VARS_MMU_SELECTOR_GATE_POS, None)
         if gate_pos is not None:
-            self.set_position(self.selector_offsets[gate_pos])
-            if gate == gate_pos:
-                self.grip_state = self.mmu.FILAMENT_DRIVE_STATE
+            # [明确修改] 位置恢复时识别“中立释放位置”标志 -1。
+            # 旧逻辑只接受 gate 索引；释放后重启时若仍按 gate 恢复，会重新夹住耗材。
+            if int(gate_pos) == -1:
+                if self.selector_release_position < 0:
+                    self.mmu.log_error(
+                        "Cannot restore neutral selector position: %s is not configured"
+                        % self.VARS_MMU_SELECTOR_RELEASE_POSITION)
+                    self.grip_state = self.mmu.FILAMENT_UNKNOWN_STATE
+                else:
+                    self.set_position(self.selector_release_position)
+                    self.grip_state = self.mmu.FILAMENT_RELEASE_STATE
             else:
+                 self.set_position(self.selector_offsets[int(gate_pos)])
+            # [明确修改] 只有真实 gate（非 -1）才允许恢复为 DRIVE 状态。
+            if int(gate_pos) >= 0 and int(gate_pos) == gate:
+                self.grip_state = self.mmu.FILAMENT_DRIVE_STATE
+            elif int(gate_pos) >= 0:
                 self.grip_state = self.mmu.FILAMENT_RELEASE_STATE
         else:
             self.grip_state = self.mmu.FILAMENT_UNKNOWN_STATE
@@ -1305,44 +1323,48 @@ class RotarySelector(BaseSelector, object):
     def filament_drive(self):
         self._grip(self.mmu.gate_selected)
 
-    #def filament_release(self, measure=False):
-        #if not self.mmu.mmu_machine.filament_always_gripped:
-            #self._grip(self.mmu.gate_selected, release=True)
-        #return 0. # Fake encoder movement
-
-    #新增
+     # [明确修改] 释放动作统一使用一个独立的中立位置
     def filament_release(self, measure=False):
        #记录当前通道编号
         gate = self.mmu.gate_selected
+        self._release_to_neutral(gate)
+        return 0.
 
-        # 检查当前通道编号是否合理
+     # [明确修改] 所有释放入口共用同一个中立位置实现，避免 MMU_RELEASE 和内部
+     # _grip(..., release=True) 产生不同的物理动作。
+    def _release_to_neutral(self, gate):
+
+        # [明确修改] 检查当前 gate，避免没有选中通道时执行释放运动。
         if gate < 0 or gate >= self.mmu.num_gates:
             self.mmu.log_always("Cannot release filament: invalid selected gate %d" % gate)
-            return 0.
-        
-        # 当filament_always_gripped=1 时，表示机构始终夹紧耗材，认为不执行释放动作
+            return False
+         # 当 filament_always_gripped=1 时，机构明确配置为不释放耗材。  
         if self.mmu.mmu_machine.filament_always_gripped:
-            return 0.
-        
-        # 移动到当前 gate 对应的释放位置
-        release_pos = self.selector_release_offsets[gate]
-        self._position(release_pos)
-        
-        #更新选择器内部的夹持状态，告诉 Happy Hare：当前选择器已经释放耗材
+            return False
+
+        # [明确修改] 中立位置未配置时直接报错并停止，绝不能把 -1 当成有效位置。
+        if self.selector_release_position < 0:
+            self.mmu.log_error(
+                "Cannot release filament: configure %s first"
+                % self.VARS_MMU_SELECTOR_RELEASE_POSITION)
+            return False
+
+        # [明确修改] 使用 _position() 进行受控运动，使 Klipper/Happy Hare 坐标保持同步。
+        self._position(self.selector_release_position)
+
+        # [明确修改] 用 -1 记录“选择器处于中立释放位置”，而不是记录某个真实 gate。
+        self.mmu.save_variable(self.VARS_MMU_SELECTOR_GATE_POS, -1, write=True)
         self.grip_state = self.mmu.FILAMENT_RELEASE_STATE
-        return 0. 
+        return True
         
     # Note there is no separation of gate selection and grip/release with this type of selector
     def _grip(self, gate, release=False):
         if gate >= 0:
             if release:
-                release_pos = self.selector_offsets[self.cad_release_gates[gate]]
-                self.mmu.log_trace("Setting selector to filament release position at position: %.1f" % release_pos)
-                self._position(release_pos)
-                self.grip_state = self.mmu.FILAMENT_RELEASE_STATE
-
-                # Precaution to ensure correct postion/gate restoration on restart
-                self.mmu.save_variable(self.VARS_MMU_SELECTOR_GATE_POS, self.cad_release_gates[gate], write=True)
+                # [明确修改] _grip(..., release=True) 也必须走统一中立位置。
+                # 原先 cad_release_gates 的“移动到另一 gate”逻辑会把释放位置当成真实通道，
+                # 与新的中立位置模型冲突，因此明确停用。
+                self._release_to_neutral(gate)
             else:
                 grip_pos = self.selector_offsets[gate]
                 self.mmu.log_trace("Setting selector to filament grip position at position: %.1f" % grip_pos)
