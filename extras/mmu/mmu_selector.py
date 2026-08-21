@@ -1320,6 +1320,8 @@ class RotarySelector(BaseSelector, object):
      # _grip(..., release=True) 产生不同的物理动作。
     def _release_to_neutral(self, gate):
 
+        # [调试修改] 确认是哪条流程触发中立释放
+        self.mmu.log_always("DEBUG: neutral release called, gate=%d" % gate)
         # [明确修改] 检查当前 gate，避免没有选中通道时执行释放运动。
         if gate < 0 or gate >= self.mmu.num_gates:
             self.mmu.log_always("Cannot release filament: invalid selected gate %d" % gate)
