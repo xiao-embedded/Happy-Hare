@@ -1176,6 +1176,12 @@ class RotarySelector(BaseSelector, object):
         self.selector_touch_speed = mmu.config.getfloat('selector_touch_speed', 60, minval=1.) # Not used with 3DChameleon but allows for param in config
         self.selector_touch_enabled = mmu.config.getint('selector_touch_enabled', 1, minval=0, maxval=1) # Not used with 3DChameleon but allows for param in config
 
+        # [明确修改-上电回零] 控制 MMU_HOME 在 force_unload=False 时是否自动执行卸料。
+        # 本项目上电时只要求选择器回零，禁止自动调用 unload_sequence()，避免回零过程中
+        # 进入 filament_release() 并移动到独立中立释放位置。显式 force_unload=True
+        # 仍然保留强制卸料能力。
+        self.selector_home_unload = mmu.config.getint('selector_home_unload', 0, minval=0, maxval=1)
+        
         # To simplfy config CAD related parameters are set based on vendor and version setting
         #
         #  cad_gate0_pos          - approximate distance from endstop to first gate
@@ -1283,7 +1289,9 @@ class RotarySelector(BaseSelector, object):
             if force_unload is True:
                 # Forced unload case for recovery
                 self.mmu.unload_sequence(check_state=True)
-            elif force_unload is False and self.mmu.filament_pos != self.mmu.FILAMENT_POS_UNLOADED:
+            elif (force_unload is False and self.selector_home_unload and 
+                  self.mmu.filament_pos != self.mmu.FILAMENT_POS_UNLOADED):
+                # [明确修改-上电回零] 仅在显式开启 selector_home_unload 时执行自动卸料。
                 # Automatic unload case
                 self.mmu.unload_sequence()
             self._home_selector()
@@ -1320,8 +1328,6 @@ class RotarySelector(BaseSelector, object):
      # _grip(..., release=True) 产生不同的物理动作。
     def _release_to_neutral(self, gate):
 
-        # [调试修改] 确认是哪条流程触发中立释放
-        self.mmu.log_always("DEBUG: neutral release called, gate=%d" % gate)
         # [明确修改] 检查当前 gate，避免没有选中通道时执行释放运动。
         if gate < 0 or gate >= self.mmu.num_gates:
             self.mmu.log_always("Cannot release filament: invalid selected gate %d" % gate)
