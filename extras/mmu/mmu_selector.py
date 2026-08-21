@@ -1243,7 +1243,9 @@ class RotarySelector(BaseSelector, object):
             self.VARS_MMU_SELECTOR_RELEASE_POSITION, None)
         if saved_release_position is None:
             self.selector_release_position = -1.0
-            self.mmu.log_error(
+            # [明确修改-启动检查] 释放位置缺失不应阻止纯回零或启动；
+            # filament_release() 会在真正执行 MMU_RELEASE 时再次严格检查。
+            self.mmu.log_always(
                 "%s not found in mmu_vars.cfg; run SAVE_VARIABLE before MMU_RELEASE"
                 % self.VARS_MMU_SELECTOR_RELEASE_POSITION)
         else:
@@ -1251,7 +1253,9 @@ class RotarySelector(BaseSelector, object):
                     self.selector_release_position = float(saved_release_position)
                 except (TypeError, ValueError):
                     self.selector_release_position = -1.0
-                    self.mmu.log_error(
+                    # [明确修改-启动检查] 非法释放位置同样延迟到释放命令时报错，
+                    # 避免仅回零时被无关的中立位置配置阻断。
+                    self.mmu.log_always(
                     "%s must be a single numeric selector position"
                     % self.VARS_MMU_SELECTOR_RELEASE_POSITION)
         # Have an endstop (most likely stallguard)?
@@ -1286,14 +1290,11 @@ class RotarySelector(BaseSelector, object):
             self.mmu.log_info("Homing MMU...")
             if force_unload is not None:
                 self.mmu.log_debug("(asked to %s)" % ("force unload" if force_unload else "not unload"))
-            if force_unload is True:
-                # Forced unload case for recovery
-                self.mmu.unload_sequence(check_state=True)
-            elif (force_unload is False and self.selector_home_unload and 
-                  self.mmu.filament_pos != self.mmu.FILAMENT_POS_UNLOADED):
-                # [明确修改-上电回零] 仅在显式开启 selector_home_unload 时执行自动卸料。
-                # Automatic unload case
-                self.mmu.unload_sequence()
+            # [明确修改-纯回零] RotarySelector 的 home() 永远只执行机械回零。
+            # 不能在这里调用 unload_sequence()：该流程最终会调用 filament_release()
+            # 并移动到 selector_release_position，导致 MMU_HOME 先释放再回零。
+            # 即使上层传入 force_unload=True，也由显式 MMU_UNLOAD/卸料流程处理；
+            # MMU_HOME 不应隐式改变耗材状态或移动到中立释放位置。
             self._home_selector()
 
     # Actual gate selection can be delayed (if not forcing grip) until the
@@ -1552,7 +1553,12 @@ class RotarySelector(BaseSelector, object):
         return True
 
     def _home_selector(self):
-        self.mmu.unselect_gate()
+        # [明确修改-纯回零] 不调用 self.mmu.unselect_gate()。
+        # Happy Hare 的 unselect_gate() 会先调用 selector.filament_release()；
+        # 对本项目而言，这会在 MMU_HOME 期间意外移动到中立释放位置。
+        # 回零只需要清除逻辑选中/夹持状态，不能执行任何释放运动。
+        self.mmu.gate_selected = self.mmu.TOOL_GATE_UNKNOWN
+        self.grip_state = self.mmu.FILAMENT_UNKNOWN_STATE
         self.mmu.movequeues_wait()
         try:
             if self.has_endstop:
