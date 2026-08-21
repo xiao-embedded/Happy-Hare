@@ -1297,28 +1297,14 @@ class RotarySelector(BaseSelector, object):
                     self._grip(gate)
 
     def restore_gate(self, gate):
-        gate_pos = self.mmu.save_variables.allVariables.get(self.VARS_MMU_SELECTOR_GATE_POS, None)
-        if gate_pos is not None:
-            # [明确修改] 位置恢复时识别“中立释放位置”标志 -1。
-            # 旧逻辑只接受 gate 索引；释放后重启时若仍按 gate 恢复，会重新夹住耗材。
-            if int(gate_pos) == -1:
-                if self.selector_release_position < 0:
-                    self.mmu.log_error(
-                        "Cannot restore neutral selector position: %s is not configured"
-                        % self.VARS_MMU_SELECTOR_RELEASE_POSITION)
-                    self.grip_state = self.mmu.FILAMENT_UNKNOWN_STATE
-                else:
-                    self.set_position(self.selector_release_position)
-                    self.grip_state = self.mmu.FILAMENT_RELEASE_STATE
-            else:
-                 self.set_position(self.selector_offsets[int(gate_pos)])
-            # [明确修改] 只有真实 gate（非 -1）才允许恢复为 DRIVE 状态。
-            if int(gate_pos) >= 0 and int(gate_pos) == gate:
-                self.grip_state = self.mmu.FILAMENT_DRIVE_STATE
-            elif int(gate_pos) >= 0:
-                self.grip_state = self.mmu.FILAMENT_RELEASE_STATE
-        else:
-            self.grip_state = self.mmu.FILAMENT_UNKNOWN_STATE
+        # [明确修改-启动回零兼容] 本项目上电后固定执行 MMU_HOME，因此这里禁止调用
+        # set_position() 恢复断电前坐标。set_position() 不会让电机运动，却会把选择器
+        # 标记为已回零；它可能覆盖 MMU_HOME 建立的真实零点，造成回零后异常补偿运动，
+        # 以及后续 gate 目标与实际机械位置不一致。
+        #
+        # gate 仍由 Happy Hare 保留为“逻辑选中通道”，但物理位置必须由 MMU_HOME
+        # 重新建立；回零完成前夹持状态只能视为未知。
+        self.grip_state = self.mmu.FILAMENT_UNKNOWN_STATE
 
     def filament_drive(self):
         self._grip(self.mmu.gate_selected)
@@ -1352,8 +1338,9 @@ class RotarySelector(BaseSelector, object):
         # [明确修改] 使用 _position() 进行受控运动，使 Klipper/Happy Hare 坐标保持同步。
         self._position(self.selector_release_position)
 
-        # [明确修改] 用 -1 记录“选择器处于中立释放位置”，而不是记录某个真实 gate。
-        self.mmu.save_variable(self.VARS_MMU_SELECTOR_GATE_POS, -1, write=True)
+        # [明确修改-修复] 不再把 mmu_selector_gate_pos 写成 -1。
+        # 该变量是 Happy Hare 原生的真实 gate 索引；写入 -1 会破坏下一次通道恢复和
+        # 选择逻辑。运行期间的实际中立坐标已经由 _position() 正确记录，无需伪造 gate。
         self.grip_state = self.mmu.FILAMENT_RELEASE_STATE
         return True
         
