@@ -1290,6 +1290,9 @@ class RotarySelector(BaseSelector, object):
             self.mmu.log_info("Homing MMU...")
             if force_unload is not None:
                 self.mmu.log_debug("(asked to %s)" % ("force unload" if force_unload else "not unload"))
+            # [明确修改-诊断标记] 用于确认 Klipper 实际加载的是本项目的 RotarySelector。
+            # 执行 MMU_HOME 时应在控制台看到该消息；看不到则说明板端源码路径/分支不正确。
+            self.mmu.log_always("[CUSTOM] RotarySelector pure-home implementation active")
             # [明确修改-纯回零] RotarySelector 的 home() 永远只执行机械回零。
             # 不能在这里调用 unload_sequence()：该流程最终会调用 filament_release()
             # 并移动到 selector_release_position，导致 MMU_HOME 先释放再回零。
